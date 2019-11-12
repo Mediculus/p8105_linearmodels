@@ -1,0 +1,318 @@
+---
+title: "P8105 Data Science I - Linear Models"
+author: "Kevin S.W."
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: github_document
+---
+
+```{r setup, include = FALSE, message = FALSE, warning = FALSE}
+
+# global default settings for chunks
+knitr::opts_chunk$set(echo = TRUE, 
+                      fig.width = 10, 
+                      fig.align = "center",
+                      results = "asis"
+                      )
+
+# loaded packages; placed here to be able to load global settings
+Packages <- c("tidyverse", "dplyr")
+invisible(lapply(Packages, library, character.only = TRUE))
+
+
+
+# global settings for color palettes
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+# theme global setting for ggplot
+theme_set(theme_minimal() + 
+            theme(legend.position = "bottom") +
+            theme(plot.title = element_text(hjust = 0.5, size = 12),
+                  plot.subtitle = element_text(hjust = 0.5, size = 8))
+          )
+
+```
+
+# Linear Regressions
+
+Linear modelling in general...we will be focusing on airbnb dataset
+
+```{r}
+
+set.seed(1)
+
+library(p8105.datasets)
+
+```
+
+### Initial data cleaning
+
+```{r}
+
+data(nyc_airbnb)
+
+nyc_airbnb = 
+  nyc_airbnb %>% 
+  mutate(stars = review_scores_location / 2) %>% 
+  rename(
+    boro = neighbourhood_group,
+    neighborhood = neighbourhood) %>% 
+  filter(boro != "Staten Island") %>% 
+  select(price, stars, boro, neighborhood, room_type)
+
+
+```
+
+### Taking a look at predicting things...
+```{r}
+# is it possible to predict price based on our variables...?
+
+# the idea is lm(predicting ~ predictor1 + predictor 2, data source)
+fit = lm(price ~ stars + boro, data = nyc_airbnb)
+
+# if reference is not specified, R will use the first in alphabetical order as the default reference
+# in this case...Bronx
+
+```
+
+Then we're going to take a look at what we got...
+
+```{r}
+
+fit
+
+# our results essentially says that if everything else is the same, an increase in star correlates with a ~$30 increase in price or if given the same stars, brooklyn is $40 more expensive, manhat is $90, queens is $13 more compared to Bronx
+
+# unfortunately, to be able to manually "specify" your reference requires changing the factor itself so that it is in the order that you want...we will later see how this can be done "easier". 
+
+
+# ways we can extract info into something "readable"
+summary(fit)
+
+coef(fit)
+
+summary(fit)$coef
+
+fitted.values(fit)
+
+```
+
+However, a better way is...using broom
+
+```{r}
+
+# this broom fn allows a quick summary of the whole thing
+# Thus, it spits out the p-value for the F-test for the global thing; "anova"
+# as such, it spits out the "hypothesis" that how significant is the difference between all these extra variables
+# versus none...
+fit %>% 
+  broom::glance()
+
+# using broom tidy however, changes all these relevant info into a readable tibble
+# which eventually allows us to do things to it
+fit %>% 
+  broom::tidy() %>% 
+  mutate(
+    term = str_replace(term, "boro", "Boro: ")  # this is changing "boroBrooklyn" etc to something more readable
+                                                # form because broom::tidy() concatenates the "group" variable and 
+                                                # appending the variable.
+  ) %>% 
+  knitr::kable(digits = 3)
+
+```
+
+### Take a look at factors...
+
+```{r}
+
+nyc_airbnb <- nyc_airbnb %>% 
+  mutate(
+    boro = fct_infreq(boro),                # fct_infreq orders the thing based in descending order of "most 
+                                            # frequent variable". This happens in the background
+    room_type = fct_infreq(room_type)
+  )
+
+```
+
+Because we had added fct_infreq in the background, when doing fit, something will change.
+
+```{r}
+
+fit = lm(price ~ stars + boro, data = nyc_airbnb) 
+
+fit %>% 
+  broom::tidy()
+
+```
+
+This looks similar in general but now we see that our reference changes to the Manhattan as opposed to earlier (Bronx)...since we adjusted Manhattan to appear first, R now thinks Manhattan is the first and uses that as reference. 
+
+This broom::tidy() function applies to a huge list of R model stuff that typically doesn't look that good. If you think you need to see a data frame...try tidy()!
+
+# Diagnostics
+
+Regression diagnostics can identify issues in model fit, especially related to certain failures in model assumptions. Examining residuals and fitted values are therefore an imporant component of any modeling exercise.
+
+For the most part, we're going to meddle with residuals. 
+
+The modelr package can be used to add residuals and fitted values to a dataframe.
+
+### adding residuals...
+
+```{r}
+
+# this function is adding residuals to a dataframe, with "what kind of fit"
+# in this case, we have our fit model (lm)
+# this model spits out a df, so we can then do things we usually do to it
+modelr::add_residuals(nyc_airbnb, fit) %>% 
+  ggplot(aes(x = boro, y = resid)) +
+  geom_violin() +
+  ylim(-500, 500)
+
+nyc_airbnb %>% 
+  modelr::add_residuals(fit) %>% 
+  ggplot(aes(x = stars, y = resid)) + 
+  geom_point() +
+  ylim(-500, 500)
+
+```
+
+### adding predictions to LMs...
+
+```{r}
+
+# this function is analogous to fitted_values?
+# essentially finding y_hat using predicted coefficients
+modelr::add_predictions(nyc_airbnb, fit)
+
+```
+
+
+### Hypothesis testing with nested stuff...
+
+We’ll comment briefly on hypothesis testing. Model summaries include results of t-tests for single coefficients, and are the standard way of assessing statistical significance.
+
+Testing multiple coefficients is somewhat more complicated. A useful approach is to use nested models, meaning that the terms in a simple “null” model are a subset of the terms in a more complex “alternative” model. The are formal tests for comparing the null and alternative models, even when several coefficients are added in the alternative model. Tests of this kind are required to assess the significance of a categorical predictor with more than two levels, as in the example below.
+
+```{r}
+
+fit_null = lm(price ~ stars + boro, data = nyc_airbnb)
+fit_alt = lm(price ~ stars + boro + room_type, data = nyc_airbnb)
+
+anova(fit_null, fit_alt) %>% 
+  broom::tidy()
+
+```
+
+# Nesting data/interactions and working with it...
+
+We’ll now turn our attention to fitting models to datasets nested within variables – meaning, essentially, that we’ll use nest to create a list column containing datasets and fit separate models to each. This is very different from fitting nested models, even though the terminology is similar.
+
+In the airbnb data, we might think that star ratings and room type affects price differently in each borough. One way to allow this kind of effect modification is through interaction terms:
+
+```{r}
+
+# adding "*" allows to specify some interaction between the two variable, in case we want to see interactions with
+# other boroughs.
+
+# eg, initially we only see the stars interaction for the reference...fixing everything else
+nyc_airbnb %>% 
+  lm(price ~ stars * boro + room_type * boro, data = .) %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+
+# our result here then, now shows the estimate of "stars", "stars:boroBrooklyn", etc...
+# meaning that stars:reference -> with every increase in stars, there's an increase of ~$30
+# while in the other boroughs, it actually has ~no relation or negative impact??
+
+# adding the room_type * boro allows us to also compare the room type to boroughs.
+# this uses entire home/apt as reference
+
+```
+
+This works, but the output takes time to think through – the expected change in price comparing an entire apartment to a private room in Queens, for example, involves the main effect of room type and the Queens / private room interaction.
+
+In the background, what we're doing is essentially something like isolating the boro variables in Brooklyn (or other boroughs)...
+
+```{r}
+
+nyc_airbnb %>% 
+  filter(boro == "Brooklyn") %>% 
+  lm(price ~ stars + room_type, data = .) %>% 
+  broom::tidy()
+
+```
+
+This is where nesting comes into play...
+
+```{r}
+
+nest_lm_res =
+  nyc_airbnb %>% 
+  # putting data = -boro says everything but boro
+  nest(data = -boro) %>% 
+  mutate(
+    models = map(.x = data, ~lm(price ~ stars + room_type, data = .x)),
+    models = map(models, broom::tidy)) %>% 
+  select(-data) %>% 
+  unnest(models)
+
+```
+
+This results into something like...
+
+```{r}
+
+nest_lm_res %>% 
+  select(boro, term, estimate) %>% 
+  mutate(term = fct_inorder(term)) %>% 
+  pivot_wider(
+    names_from = term, values_from = estimate) %>% 
+  knitr::kable(digits = 3)
+
+```
+
+However, nesting loses the "interaction" between boroughs since we've essentially "grouped" by boroughs and only compares interactions within each. Therefore, we couldn't compare statistical significance between, say, price change by stars in Manhattan vs Bronx..
+
+This ends up not looking to useful...
+
+That's where we're going to shift to a different example where nesting might be useful...
+
+An even more extreme example is the assessment of neighborhood effects in Manhattan. The code chunk below fits neighborhood-specific models:
+
+```{r}
+
+manhattan_nest_lm_res <- nyc_airbnb %>% 
+  filter(boro == "Manhattan") %>% 
+  nest(data = -neighborhood) %>% 
+  mutate(models = map(data, ~lm(price ~ stars + room_type, data = .x)),
+         models = map(models, broom::tidy)) %>% 
+  select(-data) %>% 
+  unnest(models)
+
+```
+
+And the chunk below shows neighborhood-specific estimates for the coefficients related to room type.
+
+```{r}
+
+manhattan_nest_lm_res %>% 
+  filter(str_detect(term, "room_type")) %>% 
+  ggplot(aes(x = neighborhood, y = estimate)) + 
+  geom_point() + 
+  facet_wrap(~term) + 
+  theme(axis.text.x = element_text(angle = 80, hjust = 1))
+
+nyc_airbnb %>% 
+  filter(neighborhood == "NoHo",
+         room_type == "Shared room")
+
+```
+
+There is, generally speaking, a reduction in room price for a private room or a shared room compared to an entire apartment, but this varies quite a bit across neighborhoods.
+
+With this many factor levels, it really isn’t a good idea to fit models with main effects or interactions for each. Instead, you’d be best-off using a mixed model, with random intercepts and slopes for each neighborhood. Although it’s well beyond the scope of this class, code to fit a mixed model with neighborhood-level random intercepts and random slopes for room type is below. And, of course, we can tidy the results with broom::tidy.
