@@ -40,10 +40,15 @@ theme_set(theme_minimal() +
 # LinMod II - Part 1
 I’ll write code for today’s content in a new R Markdown document called cross_validation.Rmd in the linear_models directory / repo. The code chunk below loads the usual packages (plus mgcv) and sets a seed for reproducibility.
 
-### CV “by hand”
+The goal here is to understand what is cross validation and what it's used for. 
+
+### Cross-Validation “by hand”
+This is a nice way to visualize CV and explore what happens when it's too small/big datasets, etc...
+
 We’ll start with a simulated example. The code chunk below generates data under a non-linear model; I like to use this setting because “model complexity” is easiest for me to understand when I can see it.
 
 ```{r}
+
 set.seed(1)
 
 
@@ -51,7 +56,7 @@ nonlin_df =
   tibble(
     id = 1:100,
     x = runif(100, 0, 1),
-    y = 1 - 10 * (x - .3) ^ 2 + rnorm(100, 0, .3)
+    y = 1 - 10 * (x - .3) ^ 2 + rnorm(100, 0, .3)   # some non-linear, added some "noise" (errors)
   )
 
 nonlin_df %>% 
@@ -60,27 +65,41 @@ nonlin_df %>%
 
 ```
 
+Looking at the graph, what we would like to have is a nice "curve" model that goes through the middle of the density. 
+
 I’ll split this data into training and test sets (using anti_join!!), and replot showing the split. Our goal will be to use the training data (in black) to build candidate models, and then see how those models predict in the testing data (in red).
 
 ```{r}
 
-train_df = sample_n(nonlin_df, 80)
-test_df = anti_join(nonlin_df, train_df, by = "id")
+# can specify numbers or do a ratio using size =
+# this is done by random(using sample_n)
+train_df = sample_n(nonlin_df, size = 80) 
 
+# this removes datasets in original df by IDing train_df
+test_df = anti_join(nonlin_df, train_df, by = "id") 
+
+# we can then visualize these
 ggplot(train_df, aes(x = x, y = y)) + 
   geom_point() + 
   geom_point(data = test_df, color = "red")
 
 ```
 
-I’ll fit three three models to the training data. Throughout, I’m going to use mgcv::gam for non-linear models – this is my go-to package for “additive models”, and I much prefer it to e.g. polynomial models. For today, you don’t have to know what this means, how gam works, or why I prefer it – just know that we’re putting smooth lines through data clouds, and we can control how smooth we want the fit to be.
+I’ll fit three models to the training data. Throughout, I’m going to use mgcv::gam for non-linear models – this is my go-to package for “additive models”, and I much prefer it to e.g. polynomial models. For today, you don’t have to know what this means, how gam works, or why I prefer it – just know that we’re putting smooth lines through data clouds, and we can control how smooth we want the fit to be.
 
 The three models below have very different levels of complexity and aren’t nested, so testing approaches for nested model don’t apply.
 
 ```{r}
 
+# linear model fitting, which wouldn't be too good.
 linear_mod = lm(y ~ x, data = train_df)
+
+# a function that fits a smooth line to the NLM - uses mgcv fx
+# the notation is s() indicating fit y using x but "smooth it out"
 smooth_mod = mgcv::gam(y ~ s(x), data = train_df)
+
+# a wiggly model basically by adding extra arguments so that our fitting model doesn't work
+
 wiggly_mod = mgcv::gam(y ~ s(x, k = 30), sp = 10e-6, data = train_df)
 
 ```
@@ -89,6 +108,13 @@ To understand what these models have done, I’ll plot the two gam fits.
 
 ```{r}
 
+train_df %>% 
+  add_predictions(linear_mod) %>% 
+  ggplot(aes(x = x, y = y)) +
+  geom_point() +
+  geom_line(aes(y = pred), color = "red")
+
+# we're adding some predictions first
 train_df %>% 
   add_predictions(smooth_mod) %>% 
   ggplot(aes(x = x, y = y)) + geom_point() + 
@@ -119,13 +145,21 @@ train_df %>%
 
 A quick visual inspection suggests that the linear model is too simple, the standard gam fit is pretty good, and the wiggly gam fit is too complex. Put differently, the linear model is too simple and, no matter what training data we use, will never capture the true relationship between variables – it will be consistently wrong due to its simplicity, and is therefore biased. The wiggly fit, on the other hand, is chasing data points and will change a lot from one training dataset to the the next – it will be consistently wrong due to its complexity, and is therefore highly variable. Both are bad!
 
+What we're hoping to do then, is to be able to compare these models and see which one is "best". Unfortunately, there's no handy hand-method to test these. 
+
 As a next step in my CV procedure, I’ll compute root mean squared errors (RMSEs) for each model.
 
 ```{r}
 
+# applies our model into our test dataset and check the RMSE
 rmse(linear_mod, test_df)
 rmse(smooth_mod, test_df)
 rmse(wiggly_mod, test_df)
+
+
+
+rmse(linear_mod, train_df)
+rmse(wiggly_mod, train_df)
 
 ```
 
@@ -137,6 +171,9 @@ The RMSEs are suggestive that both nonlinear models work better than the linear 
 Luckily, modelr has tools to automate elements of the CV process. In particular, crossv_mc preforms the training / testing split multiple times, a stores the datasets using list columns.
 
 ```{r}
+
+# what this does is is taking input df, run it n times, and using this automatically does everything 
+# we did above... default split for test is 80/20 but we can cusotmize this into test = [ratio]
 cv_df = 
   crossv_mc(nonlin_df, 100) 
 
@@ -146,8 +183,16 @@ crossv_mc tries to be smart about memory – rather than repeating the dataset a
 
 ```{r}
 
+# meaning that this stores the "id" by the split-group
+# below basically saying the first "test" dataset, inputting 2 will be the 2nd "test" set.
+# they also store this as lists in order to "save memory"
 cv_df %>% pull(train) %>% .[[1]] %>% as_tibble
+
+
+# this "helpfulness" however, tends to be harmful in other ways...so we're going to do things to it...
+# in this case...turn them into dataframes...so that we can do even more things to it
 cv_df %>% pull(test) %>% .[[1]] %>% as_tibble
+
 cv_df =
   cv_df %>% 
   mutate(
@@ -160,6 +205,8 @@ I now have many training and testing datasets, and I’d like to fit my candidat
 
 ```{r}
 
+# here we try to apply models to obtain models from each training datasets
+# note = if you need more than 1 variable -> use pmap()
 cv_df = 
   cv_df %>% 
   mutate(linear_mod  = map(train, ~lm(y ~ x, data = .x)),
@@ -176,7 +223,7 @@ I’m mostly focused on RMSE as a way to compare these models, and the plot belo
 ```{r}
 
 cv_df %>% 
-  select(starts_with("rmse")) %>% 
+  select(starts_with("rmse")) %>%  # selects anything with rmse
   pivot_longer(
     everything(),
     names_to = "model", 
@@ -205,6 +252,7 @@ child_growth %>%
 ```
 
 The plots suggests some non-linearity, especially at the low end of the weight distribution. We’ll try three models: a linear fit; a piecewise linear fit; and a smooth fit using gam. For the piecewise linear fit, we need to add a “change point term” to our dataframe. (Like additive models, for now it’s not critical that you understand everything about a piecewise linear fit – we’ll see a plot of the results soon, and the intuition from that is enough for our purposes.)
+
 ```{r}
 
 child_growth =
@@ -216,8 +264,9 @@ child_growth =
 The code chunk below fits each of the candidate models to the full dataset. The piecewise linear model is nested in the linear model and could be assessed using statistical significance, but the smooth model is not nested in anything else. (Also, comparing a piecewise model with a changepoint at 7 to a piecewise model with a changepoint at 8 would be a non-nested comparison…)
 
 ```{r}
+
 linear_mod    = lm(armc ~ weight, data = child_growth)
-pwl_mod    = lm(armc ~ weight + weight_cp, data = child_growth)
+pwl_mod    = lm(armc ~ weight + weight_cp, data = child_growth) # piece-wise lm using change-point model
 smooth_mod = gam(armc ~ s(weight), data = child_growth)
 
 ```
